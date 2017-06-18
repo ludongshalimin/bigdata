@@ -1,0 +1,335 @@
+一:安装Hadoop环境
+	1安装virtual box，设置虚拟网卡的IP地址，和虚拟机同一个网段
+	2在虚拟机中选用host-only网络
+		vi /etc/sysconfig/network 
+			NETWORKING=yes
+			GATEWAY=192.168.56.1
+		vi /etc/sysconfig/network-scripts/ifcfg-enp0s3 
+			TYPE=Ethernet 
+			IPADDR=192.168.56.100 
+			NETMASK=255.255.255.0
+		修改主机名hostnamectl set-hostname master (主机名千万不能有下划线！)
+		重启网络service network restart
+		互相ping，看是否测试成功，若不成功，注意防火墙的影响。
+		尤其尤其注意防火墙的影响!!在此位置遇到了问题，可以正常启动集群，但是datanode就是连接不上namenode,webui打不开，就是这个防火墙的问题
+		解决方案：        
+			# systemctl status firewalld.service  --查看防火墙状态
+			# systemctl stop firewalld.service    --关闭防火墙
+			# systemctl disable firewalld.service --永久关闭防火墙
+		
+	3将hadoop和jdk上传到虚拟机
+		安装jdk 
+			rpm -ivh jdk-8u91-linux-x64.rpm 
+		安装hadoop
+			cd /usr/local
+			tar –xvf ./hadoop-2.7.2.tar.gz
+			把目录修改为hadoop mv hadoop-2... hadoop
+			修改hadoop-env.sh
+			vi /usr/local/hadoop/etc/hadoop/hadoop-env.sh
+			修改export JAVA_HOME 语句为 export JAVA_HOME=/usr/java/default
+			把/usr/local/hadoop/bin和/usr/local/hadoop/sbin设到PATH中
+			vi /etc/profile
+			追加 export PATH=$PATH:/usr/local/hadoop/bin:/usr/local/hadoop/sbin
+			source profile
+			测试hadoop命令是否可以直接执行，任意目录下敲hadoop
+	4关闭虚拟机，复制若干份
+		分别修改虚拟机的ip和hostname，确认互相能够ping通，用ssh登陆，同时修改所有虚拟机的/etc/hosts，确认使用名字可以ping通
+		hosts文件内容：192.168.56.100 master
+						192.168.56.101 slave1
+						192.168.56.102 slave2
+		#查看所有端口使用的情况
+		netstat –apn	
+		netstat -ntlp
+	5修改master下面的slaves文件，添加datanode信息,每一个slave占一行
+		/usr/local/hadoop/etc/hadoop/slaves
+		
+		slave1
+		slave2
+		
+	6修改所有机器下/hadoop/core-site.xml配置(9000端口用于通信)
+		<property>
+			<name>fs.defaultFS</name>
+			<value>hdfs://master:9000</value>
+		</property>
+		通知slave是谁在管理他们，当在一台机器上启动start-dfs.sh命令时，会找到defaultFS的配置，然后ssh登陆，启动namenode,
+		同时到slaves目录找到每一个slave,ssh登陆，启动slave,slave会查找本机core-site.xml.找到namenode,启动后，该datanode会向namenode报告信息
+		
+	7尝试启动集群
+		hdfs namenode -format
+		启动整个集群 start-dfs.sh用jps查看各个slave是否启动
+		hdfs dfsadmin -report |more 观看整个集群的情况
+		
+		停止整个集群：stop-dfs.sh
+		单个手动启动集群中的机器(namenode)：hadoop-daemon.sh start namenode
+									停止：hadoop-daemon.sh stop namenode
+		单个手动启动集群中的机器(datanode):hadoop -daemon.sh start datanode
+									停止：hadoop-daemon.sh stop datanode
+									
+		192.168.56.100:50070通过web界面观看hadoop的访问状态				
+			
+
+	8配置免密码登陆	
+		ssh slave1
+		输入密码才能登陆
+		exit退出
+		
+		cd~
+		ls -la
+		cd .ssh
+		ssh-keygen -t rsa (四个回车)
+		#会用rsa算法生成私钥id_rsa和公钥id_rsa.pub，需要把公钥拷贝到其他机器上
+		ssh-copy-id slaveX
+		#最后再自己拷贝一份
+		ssh-copy-id master
+		再次ssh slave1
+		此时应该不再需要密码
+		
+	
+	9:使用hdfs dfs 或者hadoop fs命令对文件进行增删改查的操作
+		hadoop fs -ls /
+		hadoop fs -put /file  /
+		hadoop fs -mkdir /dirname
+		hadoop fs -text /filename
+		#删除一个文件
+		hadoop fs -rm /filename
+		#删除一个目录
+		hadoop fs -rm -rf /index/
+	
+	
+	10.适当修改master的：hdfs-site.xml
+	   将hdfs-site.xml的replication值设为2，通过网页观察分块情况，默认情况是3
+	   	<property>
+			<name>dfs.replication</name>
+			<value>2</value>
+		</property>
+	   设定dfs.namenode.heartbeat.recheck-interval为10000，然后停掉其中一台slave，观察自动复制情况
+		<property>
+			<name>dfs.namenode.heartbeat.recheck-interval</name>
+			<value>10000</value>
+		</property>
+		hdfs系统会把用到的数据存储在core-site.xml中由hadoop.tmp.dir指定，而这个值默认位于/tmp/hadoop-${user.name}下面， 
+		
+	11修改master的：core-site.xml
+		由于/tmp目录在系统重启时候会被删除，所以应该修改目录位置。 修改core-site.xml(在所有站点上都修改)
+		<property>
+			<name>hadoop.tmp.dir</name>
+			<value>/var/hadoop</value>
+		</property>
+		
+	12说一说hdfs namenode -format的问题
+		关闭防火墙后，然后重启了集群，发现datanode启动不了
+		这时候打开datanode的日志发现Failed to add storage directory [DISK]file:/tmp/hadoop-hadoop/dfs/data/  
+		”添加存储文件失败，失败路径位于“/tmp/hadoop-hadoop/dfs/data/”。
+		紧接着报Java IO异常“java.io.IOException”，
+		异常信息里显示的是，namenode和datanode的clusterID不一致，
+		这些异常就导致了后面提示初始化失败、DataNode进程退出等异常、警告信息。
+		
+		解决方案：
+		该问题因为多次对namenode进行format，每一次format主节点NameNode产生新的clusterID、namespaceID，
+		于是导致主节点的clusterID、namespaceID与各个子节点DataNode不一致。当format过后再启动hadoop，
+		hadoop尝试创建新的current目录，但是由于已存在current目录，导致创建失败，最终引起DataNode节点的DataNode进程启动失败，
+		从而引起hadoop集群完全启动失败。因此可以通过直接删除数据节点DataNode的current文件夹，进行解决该问题。
+		所以尽量少用hdfs namenode -format
+	
+	13经过上面一系列的配置现在可以使用hadoop 集群了
+		start-dfs.sh
+		stop-dfs.sh
+		hadoop-daemon.sh start namenode
+	通过java程序访问hdfs，就把HDFS集群当成一个大的系统磁盘就行了
+		
+二：Java访问HDFS
+	首先是添加hadoop所有的包，获取方式是把hadoop资源解压，添加到IDE中
+	1
+		//java读取hdfs文件，并在本地打印
+		private static void test2() throws MalformedURLException, IOException {
+			URL.setURLStreamHandlerFactory(new FsUrlStreamHandlerFactory() );
+			URL url = new URL("hdfs://192.168.56.100:9000/hello.txt");
+			InputStream in = url.openStream();
+			IOUtils.copyBytes(in, System.out,4096,true);
+		}
+		
+	2
+		//列举HDFS根目录中的文件
+		private static void Testss(FileSystem fileSystem) throws FileNotFoundException, IOException {
+			//列举目录下的子目录或者子文件的信息
+			FileStatus[] statuses = fileSystem.listStatus(new Path("/"));
+			for(FileStatus status : statuses) {
+				System.out.println(status.getPath());
+				System.out.println(status.getPermission());
+				System.out.println(status.getReplication());
+			}
+		}
+	3
+		//将本地的文件上传到HDFS中
+		private static void test(FileSystem fileSystem) throws IOException, FileNotFoundException {
+			//windows底下的文件拿到hdfs中,在hdfs中创建文件，然后本地文件上传到HDFS中
+			FSDataOutputStream out = fileSystem.create(new Path("/test.data"), true);
+			FileInputStream fis = new FileInputStream("E:/JavaBigDataProject/test/test.txt");
+			IOUtils.copyBytes(fis, out, 4096, true);
+		}
+
+		这时候往HDFS中写入数据，出现异常；Permission denied:*****
+		那先把Hadoop的权限给关闭掉
+		在namenode的hdfs-site.xml上添加一下配置
+		<property>
+			<name>dfs.permissions.enabled</name>
+			<value>false</value>
+		</property>
+		
+		
+三：YARN的安装和配置
+	1：namenode上配置mapred-site.xml
+		#配置MR执行引擎
+		<property>
+			<name>mapreduce.framework.name</name>
+			<value>yarn</value>
+		</property>
+	2:yarn-site.xml的配置
+		#hostname of ResourceMannager
+		<property>
+			<name>yarn.resourcemanager.hostname</name>
+			<value>master</value>
+		</property>
+		#一个逗号分隔的列表的服务，服务名称只能包含a-za-z0-9_不能开始数
+		<property>  
+			<name>yarn.nodemanager.aux-services</name>  
+			<value>mapreduce_shuffle</value>  
+		</property>  
+ 
+		<property>
+			<name>yarn.nodemanager.auxservices.mapreduce.shuffle.class</name>
+			<value>org.apache.hadoop.mapred.ShuffleHandler</value>
+		</property>
+	3:启动整个集群
+		start-yarn.sh
+		可以使用yarn-daemon.sh单独启动resourcemanager和nodemanager
+		通过网页http://master:8088/观察yarn集群
+		
+		出现问题：通过看nodemannager发现nodemannager找不到server
+		解决方案：在第二步的时候，把配置也加在nodemannager上。
+	4：测试官方例子
+		hadoop jar /usr/local/hadoop/share/hadoop/mapreduce/hadoop-mapreduce-examples-2.7.3.jar wordcount /hello.txt  /output
+		
+		hadoop job -kill job_id --> mapred job -kill job_id mapred job -list
+		
+	5 一个wordcount的执行过程
+		input       split(拆分)		Map(映射)		shuffle(派发)		reduce(合并)	output
+		hello java   hello java     hello 1         hello 1             hello 3         hello 3
+ 		hello c						java 1          hello 1             java 1          java 1
+		hello c++    hello  c       hello 1         hello 1             c 1             c 1
+					                c 1             java 1              c++ 1           c++ 1
+					 hello c++      hello 1         c 1
+									c++ 1           c++ 1
+		
+四：HIVE的安装和配置
+	1:将aache-hive下载到虚拟机，解压，mv apache-hive***.tar  hive 
+	2:设置环境变量，修改/etc/profile文件
+		将HADOOP_HOME,HIVE_HOME ,将bin目录加入到PATH中
+		
+		export HADOOP_HOME=/usr/local/hadoop
+		export HIVE_HOME=/usr/local/hive
+		export PATH=$PATH:/usr/local/hadoop/bin:/usr/local/hadoop/sbin
+		export PATH=$PATH:$HIVE_HOME/bin
+		
+		设置好了以后 source /etc/profile
+		
+	3:修改配置文件
+		cd /usr/local/hive/conf
+		cp hive-default.xml.template hive-site.xml
+		
+		修改hive.metastore.schema.verification，设定为false
+		
+		创建/usr/local/hive/tmp目录，替换${system:java.io.tmpdir}为该目录
+		
+		替换${system:user.name}为root
+		
+	4：schematool -initSchema -dbType derby 
+		derby为内嵌的数据库
+		会在当前目录下简历metastore_db的数据库。在哪建立的derby就在哪运行hive
+		注意！！！下次执行hive时应该还在同一目录，默认到当前目录下寻找metastore。
+		遇到问题，把metastore_db删掉，重新执行命令
+		实际工作环境中，经常使用mysql作为metastore的数据
+		
+		这个数据库存储的元数据：什么是元数据？
+		元数据：中介数据，为描述数据的数据，主要是描述数据属性的信息，用来支持如只是存储位置，历史数据，资源查找，文件记录等功能
+		
+		元数据存储的derby里面真正的数据存储在hdfs里面
+		
+	5：启动hive（在哪初始化，derby就在哪启动）
+	
+	6：演示例子wordcount
+		建表，装数据,每一句话后面一定要有分号;
+		show databases;
+		use default;
+		create table doc(line string);
+		show tables;
+		desc doc;
+		select * from doc;
+		drop table doc;
+		
+		#装载数据
+		load data inpath '/wcinput' overwrite into table doc;
+		select * from doc;
+		select split(line, ' ') from doc;
+		select explode(split(line, ' ')) from doc;
+		
+		#这里word是一个字段，w是一个表
+		select word, count(1) as count from (select explode(split(line, ' ')) as word from doc) w group by word;
+		select word, count(1) as count from (select explode(split(line, ' ')) as word from doc) w group by word order by word;
+		create table word_counts as select word, count(1) as count from (select explode(split(line, ' ')) as word from doc) w group by word order by word;
+		select * from word_counts;
+		
+		HIVE版本的wordcount:
+			create table word_counts as select word, count(1) as count from (select explode(split(line, ' ')) as word from doc) w group by word order by word;
+			select * from word_counts;
+五：SPARK的安装和配置
+		1：启动虚拟机，将spark 上传至虚拟机上，解压
+		2：本地运行模式
+			使用spark-submit提交job
+				cd /usr/local/spark
+				./bin/spark-submit --class org.apache.spark.examples.SparkPi ./examples/jars/spark-examples_2.11-2.1.0.jar 10000
+			使用spark-shell进行交互式提交
+				创建root下的文本文件hello.txt
+				./bin/spark-shell
+				再次连接一个terminal，用jps观察进程，会看到spark-submit进程
+				sc
+				sc.textFile("/root/hello.txt")
+				val lineRDD = sc.textFile("/root/hello.txt")
+				lineRDD.foreach(println)
+				观察网页端情况
+				val wordRDD = lineRDD.flatMap(line => line.split(" "))
+				wordRDD.collect
+				val wordCountRDD = wordRDD.map(word => (word,1))
+				wordCountRDD.collect
+				val resultRDD = wordCountRDD.reduceByKey((x,y)=>x+y)
+				resultRDD.collect
+				val orderedRDD = resultRDD.sortByKey(false)
+				orderedRDD.collect
+				orderedRDD.saveAsTextFile("/root/result")
+				观察结果
+				简便写法：sc.textFile("/root/hello.txt").flatMap(_.split(" ")).map((_,1)).reduceByKey(_+_).sortByKey().collect
+			使用local模式访问hdfs数据
+				前提是：集群的HDFS已经启动，
+				spark-shell执行：
+				sc.textFile("hdfs://192.168.56.100:9000/hello.txt").flatMap(_.split(" ")).map((_,1)).reduceByKey(_+_).sortByKey().collect
+				
+				sc.textFile("hdfs://192.168.56.100:9000/hello.txt").flatMap(_.split(" ")).map((_,1)).reduceByKey(_+_).sortByKey().saveAsTextFile("hdfs://192.168.56.100:9000/output1")
+			
+		3.standalone独立运行模式
+			spark建立一个集群
+		4.YARN/Mesos模式
+			运行资源管理系统之上
+		注：
+			namenode的webUI端口：50070 
+			yarn的web端口：8088 
+			spark集群的web端口：8080 
+			spark-job监控端口：4040
+
+	
+	
+	
+	
+	
+	
+	
+	
